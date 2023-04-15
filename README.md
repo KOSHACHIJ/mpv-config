@@ -6,7 +6,7 @@
 
 - <https://mpv.io/manual/stable>
 
-- <https://github.com/haasn/fsrcnn-mpv>
+- <https://github.com/igv/FSRCNN-TensorFlow>
 
 - <https://artoriuz.github.io/blog/mpv_upscaling.html>
 
