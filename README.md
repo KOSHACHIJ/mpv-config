@@ -1,6 +1,6 @@
 # mpv-config
 
-> Personal [mpv](https://github.com/mpv-player/mpv) / [IINA](https://github.com/iina/iina) configuration for macOS
+> Personal [mpv](https://github.com/mpv-player/mpv) ( [IINA](https://github.com/iina/iina) ) configuration for macOS
 
 ## links
 
