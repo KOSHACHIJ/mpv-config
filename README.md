@@ -5,5 +5,5 @@
 - <https://mpv.io/manual/master>
 - <https://artoriuz.github.io/blog/mpv_upscaling.html>
 - <https://github.com/deus0ww/mpv-conf>
-- <https://github.com/eko5624/mpv-mac>
+- <https://nightly.link/mpv-player/mpv/workflows/build/master>
 - <https://github.com/tomasklaen/uosc>
