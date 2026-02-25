@@ -1,6 +1,6 @@
 # Personal [mpv](https://github.com/mpv-player/mpv) configuration for macOS
 
-> This config only for MacBook with M-series chip and Liquid XDR Display.
+> This config only for MacBook with M-series chip and Liquid Retina XDR Display.
 
 - <https://mpv.io/manual/master>
 - <https://artoriuz.github.io/blog/mpv_upscaling.html>
