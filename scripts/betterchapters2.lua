@@ -1,4 +1,3 @@
-
 -- betterchapters2.lua
 -- Chapter navigation with circular playlist navigation.
 --
