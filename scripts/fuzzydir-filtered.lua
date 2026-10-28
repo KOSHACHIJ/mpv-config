@@ -3,15 +3,32 @@
     Based on fuzzydir.lua by sibwaf:
     https://github.com/sibwaf/mpv-scripts
 
-    Expands ** in sub-file-paths and audio-file-paths, but only includes
-    directories whose names indicate the relevant media type:
-      subtitles: "sub" (case-insensitive)
-      audio:     "sound" or "audio" (case-insensitive)
+    Expands "**" in sub-file-paths and audio-file-paths, but only with
+    directories whose names match a configurable list of substrings
+    (case-insensitive):
+      subtitles: "sub"            e.g. "UA subs", "EN Sub", "Subtitles"
+      audio:     "sound", "audio" e.g. "UA Sound", "EN audio"
 
-    When a matching directory is found, that directory and all its
-    descendant directories are included, so files may be nested inside it.
-    Other directories are still traversed to find matching directories
-    deeper in the tree.
+    A matching directory and its descendants are included, so files may be
+    nested inside it. Other directories are scanned (up to a limit) to find
+    matching directories deeper in the tree.
+
+    The scan is bounded (depth, number of directories read, number of
+    resulting paths) so it can never stall file loading, and it is cached per
+    video directory.
+
+    Options (script-opts/fuzzydir-filtered.conf):
+      enabled=yes
+      sub_patterns=sub
+      audio_patterns=sound,audio
+      max_search_depth=3        levels scanned while looking for matches
+      max_match_depth=4         levels followed inside a matching directory
+      max_scanned_dirs=300      hard cap on directory reads per scan
+      max_paths=200             cap on found paths per kind
+      discovery_threshold=50    do not descend into non-matching directories
+                                of a directory with more subdirectories than
+                                this (0 = no limit); matches in that directory
+                                are still found
 
     MIT license follows the original script's license.
 ]]
@@ -22,14 +39,32 @@ local options = require 'mp.options'
 
 local o = {
     enabled = true,
+    sub_patterns = "sub",
+    audio_patterns = "sound,audio",
     max_search_depth = 3,
-    -- 0 disables this limit and searches every directory encountered.
-    discovery_threshold = 0,
+    max_match_depth = 4,
+    max_scanned_dirs = 300,
+    max_paths = 200,
+    discovery_threshold = 50,
 }
 options.read_options(o, "fuzzydir-filtered")
 
-local default_audio_paths = mp.get_property_native("options/audio-file-paths") or {}
+local function parse_patterns(list)
+    local patterns = {}
+    for item in string.gmatch(list, "[^,]+") do
+        item = string.lower(item:match("^%s*(.-)%s*$"))
+        if item ~= "" then
+            patterns[#patterns + 1] = item
+        end
+    end
+    return patterns
+end
+
+local sub_patterns = parse_patterns(o.sub_patterns)
+local audio_patterns = parse_patterns(o.audio_patterns)
+
 local default_sub_paths = mp.get_property_native("options/sub-file-paths") or {}
+local default_audio_paths = mp.get_property_native("options/audio-file-paths") or {}
 
 local function starts_with(str, prefix)
     return string.sub(str, 1, #prefix) == prefix
@@ -52,115 +87,105 @@ local function normalize(path)
     return path
 end
 
-local function contains(list, value)
-    for _, element in ipairs(list) do
-        if element == value then
+local function matches(name, patterns)
+    local lower = string.lower(name)
+    for _, pattern in ipairs(patterns) do
+        if string.find(lower, pattern, 1, true) then
             return true
         end
     end
     return false
 end
 
-local function add_all(to, from)
-    for _, element in ipairs(from) do
-        table.insert(to, element)
-    end
-end
+-- Breadth-first scan. Returns a list of paths relative to search_path.
+-- mdepth is nil outside a matching directory; 0 for a matching directory
+-- itself and +1 for each level below it.
+local function scan(search_path, start_rel, patterns, label)
+    local found = {}
+    local queue = { { rel = start_rel, level = 1, mdepth = nil } }
+    local head = 1
+    local budget = o.max_scanned_dirs
 
-local function directory_matches(name, kind)
-    local lower = string.lower(name)
-    if kind == "sub" then
-        return string.find(lower, "sub", 1, true) ~= nil
-    end
-    return string.find(lower, "sound", 1, true) ~= nil
-        or string.find(lower, "audio", 1, true) ~= nil
-end
-
--- Traverse every directory to discover matching names. Once a matching
--- directory is entered, include all its descendants as well.
-local function traverse(search_path, current_path, level, kind, inside_match, cache)
-    -- Limit discovery depth in unrelated branches. Once a matching folder
-    -- is entered, keep including its descendants even if they are nested
-    -- deeper than max_search_depth.
-    if level > o.max_search_depth and not inside_match then
-        return {}
-    end
-
-    local cache_key = current_path .. "\0" .. kind .. "\0" .. tostring(inside_match)
-    if cache[cache_key] ~= nil then
-        return cache[cache_key]
-    end
-
-    local full_path = utils.join_path(search_path, current_path)
-    local discovered = utils.readdir(full_path, "dirs")
-    local result = {}
-
-    if discovered == nil then
-        msg.debug("fuzzydir-filtered: unable to scan " .. full_path)
-        cache[cache_key] = result
-        return result
-    end
-
-    if o.discovery_threshold > 0 and #discovered > o.discovery_threshold then
-        msg.debug("fuzzydir-filtered: too many directories in " .. full_path
-            .. " (" .. #discovered .. "), skipping")
-        cache[cache_key] = result
-        return result
-    end
-
-    for _, name in ipairs(discovered) do
-        local new_path = utils.join_path(current_path, name)
-        local matched = directory_matches(name, kind)
-        local include = inside_match or matched
-
-        if include then
-            table.insert(result, new_path)
+    while head <= #queue do
+        if budget <= 0 then
+            msg.warn(("fuzzydir-filtered: %s scan stopped, max_scanned_dirs=%d reached")
+                :format(label, o.max_scanned_dirs))
+            break
+        end
+        if #found >= o.max_paths then
+            msg.warn(("fuzzydir-filtered: %s scan stopped, max_paths=%d reached")
+                :format(label, o.max_paths))
+            break
         end
 
-        add_all(result, traverse(
-            search_path,
-            new_path,
-            level + 1,
-            kind,
-            inside_match or matched,
-            cache
-        ))
+        local item = queue[head]
+        head = head + 1
+        budget = budget - 1
+
+        local dirs = utils.readdir(utils.join_path(search_path, item.rel), "dirs")
+        if dirs then
+            table.sort(dirs)
+            local too_many = o.discovery_threshold > 0
+                and #dirs > o.discovery_threshold
+
+            for _, name in ipairs(dirs) do
+                local rel = utils.join_path(item.rel, name)
+
+                local mdepth
+                if item.mdepth ~= nil then
+                    mdepth = item.mdepth + 1
+                elseif matches(name, patterns) then
+                    mdepth = 0
+                end
+
+                if mdepth ~= nil then
+                    if mdepth <= o.max_match_depth then
+                        found[#found + 1] = rel
+                        if mdepth < o.max_match_depth then
+                            queue[#queue + 1] = { rel = rel, level = item.level + 1, mdepth = mdepth }
+                        end
+                    end
+                elseif item.level < o.max_search_depth and not too_many then
+                    queue[#queue + 1] = { rel = rel, level = item.level + 1, mdepth = nil }
+                end
+            end
+        end
     end
 
-    cache[cache_key] = result
+    msg.debug(("fuzzydir-filtered: %s: %d dirs read, %d paths found")
+        :format(label, o.max_scanned_dirs - budget, #found))
+    return found
+end
+
+local function expand_kind(raw_paths, search_path, patterns, label)
+    local result, seen = {}, {}
+
+    local function add(path)
+        local p = normalize(path)
+        if p ~= "" and not seen[p] then
+            seen[p] = true
+            result[#result + 1] = p
+        end
+    end
+
+    for _, raw in ipairs(raw_paths) do
+        local parent, leftover = utils.split_path(raw)
+        if leftover == "**" then
+            add(parent)
+            for _, p in ipairs(scan(search_path, parent, patterns, label)) do
+                add(p)
+            end
+        else
+            add(raw)
+        end
+    end
+
     return result
 end
 
-local function explode(raw_paths, search_path, kind, cache)
-    local result = {}
-
-    for _, raw_path in ipairs(raw_paths) do
-        local parent, leftover = utils.split_path(raw_path)
-
-        if leftover == "**" then
-            -- Preserve an explicitly configured parent path, matching the
-            -- behavior of the original fuzzydir.lua.
-            if parent ~= "" then
-                table.insert(result, parent)
-            end
-
-            add_all(result, traverse(search_path, parent, 1, kind, false, cache))
-        else
-            -- Paths without a trailing ** are left untouched.
-            table.insert(result, raw_path)
-        end
-    end
-
-    local normalized = {}
-    for _, path in ipairs(result) do
-        local normalized_path = normalize(path)
-        if normalized_path ~= "" and not contains(normalized, normalized_path) then
-            table.insert(normalized, normalized_path)
-        end
-    end
-
-    return normalized
-end
+-- Cache for the last scanned video directory, so a whole season in one
+-- folder is scanned only once.
+local cache = { dir = nil, sub = nil, audio = nil }
 
 local function expand_all()
     if not o.enabled then
@@ -168,7 +193,9 @@ local function expand_all()
     end
 
     local video_path = mp.get_property("path")
-    if not video_path or video_path == "" then
+    -- Skip URLs and empty paths.
+    if not video_path or video_path == ""
+        or string.match(video_path, "^%a[%w+.-]*://") then
         return
     end
 
@@ -177,17 +204,20 @@ local function expand_all()
         search_path = "."
     end
 
-    msg.debug("fuzzydir-filtered: search_path = " .. search_path)
+    if cache.dir ~= search_path then
+        local started = mp.get_time()
+        cache.sub = expand_kind(default_sub_paths, search_path, sub_patterns, "subtitles")
+        cache.audio = expand_kind(default_audio_paths, search_path, audio_patterns, "audio")
+        cache.dir = search_path
+        msg.verbose(("fuzzydir-filtered: scanned %s in %.0f ms")
+            :format(search_path, (mp.get_time() - started) * 1000))
+    end
 
-    -- Separate caches because subtitle and audio directory matching differ.
-    local sub_paths = explode(default_sub_paths, search_path, "sub", {})
-    local audio_paths = explode(default_audio_paths, search_path, "audio", {})
+    msg.debug("fuzzydir-filtered: sub paths: " .. table.concat(cache.sub, ":"))
+    msg.debug("fuzzydir-filtered: audio paths: " .. table.concat(cache.audio, ":"))
 
-    msg.debug("fuzzydir-filtered: subtitle search paths: " .. table.concat(sub_paths, ":"))
-    msg.debug("fuzzydir-filtered: audio search paths: " .. table.concat(audio_paths, ":"))
-
-    mp.set_property_native("options/sub-file-paths", sub_paths)
-    mp.set_property_native("options/audio-file-paths", audio_paths)
+    mp.set_property_native("options/sub-file-paths", cache.sub)
+    mp.set_property_native("options/audio-file-paths", cache.audio)
 end
 
 mp.add_hook("on_load", 50, expand_all)

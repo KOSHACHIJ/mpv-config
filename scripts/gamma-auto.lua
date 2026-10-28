@@ -1,29 +1,50 @@
-local function lux_to_gamma(lmin, lmax, rmin, rmax, lux)
-    if lmax <= lmin or lux == 0 then
-        return 1
+-- gamma-auto.lua
+-- Ambient-light gamma adjustment for SDR (gamma-factor 1.0 .. 1.2).
+-- HDR PQ/HLG content always gets gamma-factor 1.0.
+-- Does nothing until both the ambient light and the video transfer
+-- function are known, so it never touches gamma-factor on machines
+-- without a light sensor and never flashes SDR gamma on HDR video.
+
+local LUX_MIN, LUX_MAX = 16, 256
+local GAMMA_MIN, GAMMA_MAX = 1.0, 1.2
+
+local LOG_MIN = math.log(LUX_MIN, 10)
+local LOG_RANGE = math.log(LUX_MAX, 10) - LOG_MIN
+
+local ambient_lux
+local transfer
+
+local function lux_to_gamma(lux)
+    if lux <= LUX_MIN then
+        return GAMMA_MIN
+    end
+    if lux >= LUX_MAX then
+        return GAMMA_MAX
+    end
+    local t = (math.log(lux, 10) - LOG_MIN) / LOG_RANGE
+    return GAMMA_MIN + (GAMMA_MAX - GAMMA_MIN) * t
+end
+
+local function update_gamma()
+    if not ambient_lux or not transfer then
+        return
     end
 
-    local num = (rmax - rmin) * (math.log(lux, 10) - math.log(lmin, 10))
-    local den = math.log(lmax, 10) - math.log(lmin, 10)
-    local result = num / den + rmin
+    local gamma = (transfer == "pq" or transfer == "hlg")
+        and 1.0
+        or lux_to_gamma(ambient_lux)
 
-    -- clamp the result
-    local max = math.max(rmax, rmin)
-    local min = math.min(rmax, rmin)
-
-    return math.max(math.min(result, max), min)
+    if math.abs(mp.get_property_number("gamma-factor", 1.0) - gamma) > 0.001 then
+        mp.set_property_number("gamma-factor", gamma)
+    end
 end
 
-local function lux_changed(_, lux)
-    local gamma = lux_to_gamma(16.0, 256.0, 1.0, 1.2, lux or 0)
-    mp.set_property_number("gamma-factor", gamma)
-end
+mp.observe_property("ambient-light", "number", function(_, value)
+    ambient_lux = value
+    update_gamma()
+end)
 
-if mp.get_property("platform") == "linux" then
-    -- observing ambient-light isn't supported on Linux
-    mp.add_periodic_timer(1, function()
-        lux_changed(nil, mp.get_property_number("ambient-light"))
-    end)
-else
-    mp.observe_property("ambient-light", "number", lux_changed)
-end
+mp.observe_property("video-params/gamma", "string", function(_, value)
+    transfer = value
+    update_gamma()
+end)
