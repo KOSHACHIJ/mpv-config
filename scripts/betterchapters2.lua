@@ -1,62 +1,95 @@
--- betterchapters2 ( refactor with ChatGPT )
+
+-- betterchapters2.lua
 -- Chapter navigation with circular playlist navigation.
--- Recommended with autoload.lua.
 --
 -- ] = next chapter / next playlist entry
 -- [ = previous chapter / previous playlist entry
-
-
--- betterchapters.lua
--- Chapter navigation with explicit circular playlist navigation.
--- loop-playlist does not control boundary navigation.
 --
--- ] = next chapter / next playlist entry
--- [ = previous chapter / previous playlist entry
--- Recommended with autoload.lua
+-- No text OSD notifications.
+-- uosc timeline flashes on chapter/file changes.
+-- Directories are excluded by autoload.conf (directory_mode=ignore).
+
+local pending_entry_id = nil
+
+local function flash_timeline()
+    mp.commandv("script-message-to", "uosc", "flash-elements", "timeline")
+end
+
+local function playlist_entry_id(index)
+    local playlist = mp.get_property_native("playlist", {})
+    local entry = playlist[index + 1]
+    return entry and entry.id
+end
 
 local function chapter_seek(direction)
-    local chapters = mp.get_property_number("chapters", 0)
-    local chapter = mp.get_property_number("chapter", -1)
+    -- 1. Navigate chapters in the current file.
+    local count = mp.get_property_number("chapters", 0)
 
-    -- Before the first chapter, ] selects the first chapter.
-    if chapters > 0 and chapter < 0 and direction > 0 then
-        mp.commandv("set", "chapter", 0)
-        mp.commandv("script-message", "osc-chapterlist")
-        return
-    end
+    if count > 0 then
+        local chapter = mp.get_property_number("chapter", -1)
 
-    -- Navigate within the current file if another chapter exists.
-    if chapters > 0 and chapter >= 0 then
-        local target_chapter = chapter + direction
-        if target_chapter >= 0 and target_chapter < chapters then
-            mp.commandv("add", "chapter", direction)
-            mp.commandv("script-message", "osc-chapterlist")
+        -- Playback is before the first chapter.
+        if chapter < 0 and direction > 0 then
+            mp.set_property_number("chapter", 0)
+            flash_timeline()
             return
+        end
+
+        if chapter >= 0 then
+            local target = chapter + direction
+
+            if target >= 0 and target < count then
+                mp.set_property_number("chapter", target)
+                flash_timeline()
+                return
+            end
         end
     end
 
-    -- Chapter boundary, or no chapters: wrap the playlist explicitly.
+    -- 2. At a chapter boundary (or no chapters), move through
+    --    the playlist, wrapping around independently of loop-playlist.
     local pos = mp.get_property_number("playlist-pos", -1)
-    local count = mp.get_property_number("playlist-count", 0)
+    local total = mp.get_property_number("playlist-count", 0)
 
-    if count < 2 or pos < 0 or pos >= count then
-        mp.msg.warn(string.format(
-            "betterchapters: invalid playlist position=%d count=%d",
-            pos, count
-        ))
+    if total < 2 or pos < 0 or pos >= total then
         return
     end
 
-    local target = (pos + direction) % count
+    for step = 1, total - 1 do
+        local target = (pos + direction * step) % total
+        local id = playlist_entry_id(target)
 
-    mp.msg.info(string.format(
-        "betterchapters: playlist %d -> %d (count=%d)",
-        pos, target, count
-    ))
-
-    mp.commandv("playlist-play-index", target)
-    mp.commandv("script-message", "osc-playlist")
+        if id ~= nil then
+            pending_entry_id = id
+            mp.commandv("playlist-play-index", target)
+            return
+        end
+    end
 end
+
+-- Flash only when the requested playlist entry has loaded.
+mp.register_event("file-loaded", function()
+    if pending_entry_id == nil then
+        return
+    end
+
+    local pos = mp.get_property_number("playlist-pos", -1)
+    local id = pos >= 0 and playlist_entry_id(pos) or nil
+
+    if id == pending_entry_id then
+        pending_entry_id = nil
+        flash_timeline()
+    end
+end)
+
+-- Clear the pending request if its target fails to load.
+mp.register_event("end-file", function(event)
+    if pending_entry_id ~= nil
+        and event
+        and event.playlist_entry_id == pending_entry_id then
+        pending_entry_id = nil
+    end
+end)
 
 mp.add_key_binding("]", "chapter_next", function()
     chapter_seek(1)

@@ -1,41 +1,29 @@
-
--- gamma-auto.lua
--- Ambient-light gamma adjustment for SDR.
--- Keep gamma-factor at 1.0 for HDR PQ/HLG content.
-
-local function lux_to_gamma(lux)
-    if not lux or lux <= 16 then
-        return 1.0
+local function lux_to_gamma(lmin, lmax, rmin, rmax, lux)
+    if lmax <= lmin or lux == 0 then
+        return 1
     end
 
-    if lux >= 256 then
-        return 1.2
-    end
+    local num = (rmax - rmin) * (math.log(lux, 10) - math.log(lmin, 10))
+    local den = math.log(lmax, 10) - math.log(lmin, 10)
+    local result = num / den + rmin
 
-    local t = (math.log(lux, 10) - math.log(16, 10)) /
-              (math.log(256, 10) - math.log(16, 10))
+    -- clamp the result
+    local max = math.max(rmax, rmin)
+    local min = math.min(rmax, rmin)
 
-    return 1.0 + 0.2 * t
+    return math.max(math.min(result, max), min)
 end
 
-local ambient_lux
-local transfer
-
-local function update_gamma()
-    if transfer == "pq" or transfer == "hlg" then
-        mp.set_property_number("gamma-factor", 1.0)
-        return
-    end
-
-    mp.set_property_number("gamma-factor", lux_to_gamma(ambient_lux))
+local function lux_changed(_, lux)
+    local gamma = lux_to_gamma(16.0, 256.0, 1.0, 1.2, lux or 0)
+    mp.set_property_number("gamma-factor", gamma)
 end
 
-mp.observe_property("ambient-light", "number", function(_, value)
-    ambient_lux = value
-    update_gamma()
-end)
-
-mp.observe_property("video-params/gamma", "string", function(_, value)
-    transfer = value
-    update_gamma()
-end)
+if mp.get_property("platform") == "linux" then
+    -- observing ambient-light isn't supported on Linux
+    mp.add_periodic_timer(1, function()
+        lux_changed(nil, mp.get_property_number("ambient-light"))
+    end)
+else
+    mp.observe_property("ambient-light", "number", lux_changed)
+end
